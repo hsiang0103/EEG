@@ -36,9 +36,10 @@ class LCT(nn.Module):
 
         # 6) MLP
         self.MLP = nn.Sequential(
-            nn.Linear(in_features=128, out_features=1),
+            nn.Linear(in_features=128, out_features=2),
             #nn.Softmax(dim=-1)
         )
+        self.drop = nn.Dropout(p=0.2)
 
         # output
         # [inter-ictal, ictal]
@@ -57,6 +58,7 @@ class LCT(nn.Module):
         tokens = self.encoder6(tokens)
         tokens = tokens[:, 0]
         tokens = self.seq(tokens)
+        tokens = self.drop(tokens)
         output = self.MLP(tokens)
 
         return output
@@ -130,10 +132,11 @@ class encoder(nn.Module):
         self.MLP = MLP()
         self.multiHeadedAttention = multiheadedattention()
         self.norm2 = eval("nn.LayerNorm")(embed_dim, eps=epsilon)
+        self.drop = nn.Dropout(p=0.2)
 
     def forward(self, x):
-        x = x + self.multiHeadedAttention(self.norm1(x))
-        x = x + self.MLP(self.norm2(x))
+        x = self.norm1(x + self.drop(self.multiHeadedAttention(x)))
+        x = self.norm2(x + self.MLP(x))
         return x
 
 
@@ -142,14 +145,18 @@ class MLP(nn.Module):
         super().__init__()
         # out_features = out_features or in_features
         # hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
         #self.act = nn.Sigmoid()
+        self.drop1 = nn.Dropout(p=0.2)
+        self.fc1 = nn.Linear(in_features, hidden_features)
         self.act = nn.ReLU()
+        self.drop2 = nn.Dropout(p=0.2)
         self.fc2 = nn.Linear(hidden_features, out_features)
 
     def forward(self, x):
+        x = self.drop1(x)
         x = self.fc1(x)
         x = self.act(x)
+        x = self.drop2(x)
         x = self.fc2(x)
         return x
 
