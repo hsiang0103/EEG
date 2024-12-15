@@ -4,8 +4,9 @@ import math
 import torch
 from utils import processbar
 import numpy as np
+from imblearn.over_sampling import SMOTE
 from pyedflib import highlevel
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 
 
@@ -15,7 +16,8 @@ class EDFdataset(Dataset):
             freq:int = 256,
             dataset_folder_path:str = "",
             duration:int = 1,
-            overlay:float = 0.25
+            overlay:float = 0.25,
+            mode = ""
         ) -> None:
         """
         Constructor of class of EDFDataset
@@ -47,15 +49,26 @@ class EDFdataset(Dataset):
         self.summary_dictory        = []
         self.dataset_name           = self.dataset_folder_path.split("/")[-2]
         self.datas                  = []
-        self.trasfroms              = transforms.Compose([
-            transforms.Resize((224, 224), antialias=True)
+        self.mode                   = mode
+        self.transform              = transforms.Compose([
+            transforms.Normalize((.5), (.5))
         ])
+
+        assert self.mode.lower() == "train" or self.mode.lower() == "valid"
+
+        self.features = []
+        self.label = []
 
         # read summary file and create dircetory
         self.summary_files()
 
         # split windows 
         self.split_windows()
+
+        # balance
+        if self.mode.lower() == "train":
+            self.balance()
+            
 
     def summary_files(self) -> None:
         """
@@ -101,8 +114,10 @@ class EDFdataset(Dataset):
             # some edf file contain 24th signal (ECG), clean it
             signals_tensor = signals_tensor[:, :23, :] if signals_tensor.shape[1] > 23 else signals_tensor
 
-            # normalize each channel
-            signals_tensor = torch.nn.functional.normalize(signals_tensor, dim=2)
+            # standardization each channel
+            signals_tensor = (signals_tensor - signals_tensor.mean(dim=2, keepdim=True)) / signals_tensor.std(dim=2, keepdim=True)
+            
+            #signals_tensor = torch.nn.functional.normalize(signals_tensor, dim=2)
 
             # split windows
             window_width = self.duration * self.freq
@@ -129,6 +144,8 @@ class EDFdataset(Dataset):
                         label = 0
                 # append data
                 self.datas.append((signals_tensor[:, :, start_point : end_point], label))
+                self.features.append(signals_tensor[:, :, start_point: end_point].squeeze(0).numpy())
+                self.label.append(label)
 
                 # move window
                 start_point += int((1 - self.overlay) * window_width)
@@ -140,7 +157,7 @@ class EDFdataset(Dataset):
         return len(self.datas)
 
     def __getitem__(self, index):
-        return (self.datas[index][0], self.datas[index][1])
+        return (self.transform(self.datas[index][0]), self.datas[index][1])
     
     def append_other_dataset(self, datasets_list):
         """
@@ -148,38 +165,83 @@ class EDFdataset(Dataset):
         """
         for single_dataset in datasets_list:
             self.datas += single_dataset.datas
+    
+    def balance(self):
+        X = []
+        Y = []
+        for i in range(np.array(self.features).shape[2]):
+            X_res, Y_res = SMOTE(random_state=42).fit_resample(np.array(self.features)[:,:,i], np.array(self.label))
+            X.append(torch.tensor(X_res).unsqueeze(2))
+            Y = torch.tensor(Y_res)
+
+            processbar(
+                now_process=i + 1, 
+                all=np.array(self.features).shape[2], 
+                total_len=30, 
+                info=f"{i + 1}/{np.array(self.features).shape[2]} balanced part1.",
+                needed_clear = True
+            )
+        X = torch.cat(X,2)
+        C = []
+        for i in range(X.shape[0]):
+            C.append((X.unsqueeze(1)[i,:,:,:], Y[i]))
+
+            processbar(
+                now_process=i + 1, 
+                all=X.shape[0], 
+                total_len=30, 
+                info=f"{i + 1}/{X.shape[0]} balanced part2.",
+                needed_clear = True
+            )
+        self.datas = C.copy()
+
 
 def multi_dataset(
     freq:int = 256,
-    num_of_dataset:int = 1,
+    dataset_list:list = [1],
     duration:int = 1,
-    overlay:float = 0.25
+    overlay:float = 0.25,
+    mode:str = ""
 ) -> EDFdataset:
-    
-    print(f"loading {num_of_dataset} datasets...")
-    dataset_list = []
+    print(f"loading ", end="")
+    dataset_name = ["chb" + (str(single_dataset).zfill(2)) for single_dataset in dataset_list]
+    for single_dataset_name in dataset_name:
+        if single_dataset_name == dataset_name[-1]:
+            print(single_dataset_name + " ", end="")
+        else:
+            print(single_dataset_name + ", ", end="")
+    print(f"datasets...")
+
+    multi_dataset = []
     # create multi dataset
-    for i in range(1, num_of_dataset + 1):
-        dataset_folder_path = f"/homes/nfs/caslab_bs/Desktop/Dennis/physionet.org/files/chbmit/1.0.0/chb{str(i).zfill(2)}/"
-        dataset_list.append(
+    for single_dataset in dataset_list:
+        dataset_folder_path = f"/homes/nfs/caslab_bs/Desktop/Dennis/physionet.org/files/chbmit/1.0.0/chb{str(single_dataset).zfill(2)}/"
+        multi_dataset.append(
             EDFdataset(
                 freq=freq,
                 dataset_folder_path=dataset_folder_path,
                 duration=duration,
-                overlay=overlay
+                overlay=overlay,
+                mode=mode
             )
         )
 
     # combine each dataset
-    first_dataset = dataset_list[0]
-    first_dataset.append_other_dataset(dataset_list[1:])
+    first_dataset = multi_dataset[0]
+    first_dataset.append_other_dataset(multi_dataset[1:])
 
     return first_dataset
 
-# a = EDFdataset(dataset_folder_path="/homes/nfs/caslab_bs/Desktop/Dennis/physionet.org/files/chbmit/1.0.0/chb01/")
-# 
-# pos_num=0
-# neg_num=0
+#a = EDFdataset(dataset_folder_path="/homes/nfs/caslab_bs/Desktop/Dennis/physionet.org/files/chbmit/1.0.0/chb01/")
+# dataLoader = DataLoader(dataset=a, batch_size=512, shuffle=True)
+# for i, data in enumerate(dataLoader):
+#     window_value, label = data
+#     print(window_value[0])
+#     print(window_value[1])
+#     break
+
+# neg_num = 0
+# pos_num = 0
 # 
 # for idx, data in enumerate(a):
 #     if data[1] == 1 :
